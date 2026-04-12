@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { BlogPost, Category, ViewState, BlockType, ContentBlock, SiteSettings, User, Comment } from './types';
 import { Icons } from './components/Icons';
 import { BlockEditor } from './components/BlockEditor';
@@ -76,10 +76,9 @@ const GoogleIcon = () => (
 
 const NotificationToast = ({ message, onClose }: { message: string | null, onClose: () => void }) => {
     useEffect(() => {
-        if(message) {
-            const t = setTimeout(onClose, 4000);
-            return () => clearTimeout(t);
-        }
+        if (!message) return;
+        const t = setTimeout(onClose, 4000);
+        return () => clearTimeout(t);
     }, [message, onClose]);
 
     if (!message) return null;
@@ -1487,7 +1486,7 @@ const Editor: React.FC<{
   const [tagInput, setTagInput] = useState('');
 
   const handleBlockChange = (blocks: ContentBlock[]) => {
-    setEditedPost({ ...editedPost, blocks });
+    setEditedPost(prev => ({ ...prev, blocks }));
   };
   
   const handleTitleSuggest = async () => {
@@ -1581,7 +1580,7 @@ const Editor: React.FC<{
   return (
     <div className="flex h-screen overflow-hidden bg-white">
       {/* Sidebar - Settings */}
-      <div className={`fixed inset-y-0 right-0 w-80 bg-white border-l border-stone-200 transform transition-transform duration-300 z-30 shadow-2xl p-6 overflow-y-auto ${showSettings ? 'translate-x-0' : 'translate-x-full'}`}>
+      <div className={`fixed inset-y-0 right-0 w-80 bg-white border-l border-stone-200 transform transition-transform duration-300 z-30 shadow-2xl p-6 overflow-y-auto ${showSettings ? 'translate-x-0 pointer-events-auto' : 'translate-x-full pointer-events-none'}`}>
           <div className="flex justify-between items-center mb-6">
               <h3 className="font-serif font-bold text-xl">Post Settings</h3>
               <button onClick={() => setShowSettings(false)} className="text-stone-400 hover:text-stone-600"><Icons.X size={20}/></button>
@@ -1667,7 +1666,7 @@ const Editor: React.FC<{
 
       {/* Main Editor Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden relative transition-all duration-300" style={{ marginRight: showSettings ? '320px' : '0' }}>
-        <header className="bg-white border-b border-stone-100 px-6 py-4 flex items-center justify-between z-20">
+        <header className="relative bg-white border-b border-stone-100 px-6 py-4 flex items-center justify-between z-40">
             <div className="flex items-center gap-4">
                 <button onClick={onCancel} className="p-2 hover:bg-stone-100 rounded-full text-stone-500 transition-colors">
                     <Icons.ChevronLeft size={20} />
@@ -1685,10 +1684,10 @@ const Editor: React.FC<{
                      <Icons.Layout size={16}/> <span className="hidden md:inline">Settings</span>
                  </button>
                  <div className="h-6 w-px bg-stone-200 mx-2"></div>
-                 <button onClick={() => onSave({...editedPost, status: 'draft'})} className="px-4 py-2 text-stone-600 font-bold text-sm hover:bg-stone-50 rounded-lg transition-colors">
+                 <button type="button" onClick={() => onSave({...editedPost, status: 'draft'})} className="px-4 py-2 text-stone-600 font-bold text-sm hover:bg-stone-50 rounded-lg transition-colors">
                      Save Draft
                  </button>
-                 <button onClick={() => onSave({...editedPost, status: 'published'})} className="px-5 py-2 bg-stone-900 text-white font-bold text-sm rounded-lg hover:bg-stone-800 transition-colors shadow-lg hover:shadow-xl">
+                 <button type="button" onClick={() => onSave({...editedPost, status: 'published'})} className="px-5 py-2 bg-stone-900 text-white font-bold text-sm rounded-lg hover:bg-stone-800 transition-colors shadow-lg hover:shadow-xl">
                      Publish
                  </button>
             </div>
@@ -1748,6 +1747,7 @@ const App: React.FC = () => {
   const [newsletterOpen, setNewsletterOpen] = useState(false);
   const [restrictionOpen, setRestrictionOpen] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
+  const dismissNotification = useCallback(() => setNotification(null), []);
   const [siteSettings, setSiteSettings] = useState<SiteSettings>({
       siteName: 'Ro-shines',
       heroImage: DEFAULT_HERO_IMAGE,
@@ -1757,6 +1757,10 @@ const App: React.FC = () => {
   
   // Track Views - Ref to prevent double counting in strict mode
   const lastViewedIdRef = useRef<string | null>(null);
+  /** Stable id for a new draft so parent re-renders don't rotate crypto.randomUUID() */
+  const newDraftPostIdRef = useRef<string | null>(null);
+  /** Prevents overlapping saves from double-clicks or slow networks */
+  const postSaveInFlightRef = useRef(false);
 
   // Load initial data and User Session
   useEffect(() => {
@@ -1894,37 +1898,52 @@ const App: React.FC = () => {
   };
 
   const handlePostUpdate = async (updatedPost: BlogPost) => {
+    if (postSaveInFlightRef.current) return;
+    postSaveInFlightRef.current = true;
+
     const existing = posts.find(p => p.id === updatedPost.id);
     const isNewPublish = existing?.status !== 'published' && updatedPost.status === 'published';
+    const postToSave =
+      isNewPublish
+        ? { ...updatedPost, publishedAt: new Date().toISOString() }
+        : updatedPost;
 
-    // Optimistic update
-    if (existing) {
-      setPosts(posts.map(p => p.id === updatedPost.id ? updatedPost : p));
-    } else {
-      setPosts([updatedPost, ...posts]);
-    }
-    
-    // Save to Firestore
+    // Optimistic update (functional to avoid stale `posts` if multiple updates queue)
+    setPosts(prev => {
+      const hit = prev.find(p => p.id === postToSave.id);
+      if (hit) {
+        return prev.map(p => (p.id === postToSave.id ? postToSave : p));
+      }
+      return [postToSave, ...prev];
+    });
+
     try {
-      await db.savePost(updatedPost);
+      await db.savePost(postToSave);
     } catch (error) {
       console.error('Error saving post to Firestore:', error);
-      // Revert optimistic update on failure
       if (existing) {
-        setPosts(prev => prev.map(p => p.id === updatedPost.id ? existing : p));
+        setPosts(prev => prev.map(p => (p.id === postToSave.id ? existing : p)));
       } else {
-        setPosts(prev => prev.filter(p => p.id !== updatedPost.id));
+        setPosts(prev => prev.filter(p => p.id !== postToSave.id));
       }
       setNotification('Failed to save post. Please try again.');
       return;
+    } finally {
+      postSaveInFlightRef.current = false;
     }
-    
-    setView({ type: 'admin-dashboard' });
 
-    // Notify on Publish
-    if(isNewPublish) {
+    setView({ type: 'admin-dashboard' });
+    newDraftPostIdRef.current = null;
+
+    if (postToSave.status === 'published') {
+      if (isNewPublish) {
         const subCount = await db.getSubscribersCount();
         setNotification(`Story published! ${subCount} subscriber${subCount !== 1 ? 's' : ''} on your list.`);
+      } else {
+        setNotification('Story updated and published.');
+      }
+    } else {
+      setNotification('Draft saved.');
     }
   };
 
@@ -2003,8 +2022,16 @@ const App: React.FC = () => {
         );
       case 'admin-editor':
         if (!user?.isAdmin) return <HomeView posts={posts} onPostClick={id => setView({ type: 'post', postId: id })} searchQuery={searchQuery} setSearchQuery={setSearchQuery} heroImage={siteSettings.heroImage} />;
-        const editPost = view.postId ? posts.find(p => p.id === view.postId) : {
-            id: crypto.randomUUID(),
+        let editPost: BlogPost | undefined;
+        if (view.postId) {
+          newDraftPostIdRef.current = null;
+          editPost = posts.find(p => p.id === view.postId);
+        } else {
+          if (!newDraftPostIdRef.current) {
+            newDraftPostIdRef.current = crypto.randomUUID();
+          }
+          editPost = {
+            id: newDraftPostIdRef.current,
             title: '',
             excerpt: '',
             coverImage: 'https://images.unsplash.com/photo-1507646227500-4d389b0012be?auto=format&fit=crop&q=80&w=1200',
@@ -2015,8 +2042,21 @@ const App: React.FC = () => {
             publishedAt: new Date().toISOString(),
             status: 'draft',
             views: 0
-        } as BlogPost;
-        return <Editor post={editPost!} onSave={handlePostUpdate} onCancel={() => setView({ type: 'admin-dashboard' })} />;
+          } as BlogPost;
+        }
+        return editPost ? (
+          <Editor
+            key={editPost.id}
+            post={editPost}
+            onSave={handlePostUpdate}
+            onCancel={() => {
+              newDraftPostIdRef.current = null;
+              setView({ type: 'admin-dashboard' });
+            }}
+          />
+        ) : (
+          <div className="p-8">Post not found</div>
+        );
       case 'admin-settings':
           if (!user?.isAdmin) return <HomeView posts={posts} onPostClick={id => setView({ type: 'post', postId: id })} searchQuery={searchQuery} setSearchQuery={setSearchQuery} heroImage={siteSettings.heroImage} />;
           return <AdminSettings settings={siteSettings} onSave={handleSaveSettings} onCancel={() => setView({ type: 'admin-dashboard' })} />;
@@ -2027,7 +2067,7 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-stone-50 text-stone-800 font-sans selection:bg-rose-100 selection:text-rose-900">
-      <NotificationToast message={notification} onClose={() => setNotification(null)} />
+      <NotificationToast message={notification} onClose={dismissNotification} />
 
       {view.type !== 'admin-editor' && (
           <Header 
