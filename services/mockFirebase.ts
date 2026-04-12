@@ -18,6 +18,26 @@ import {
   writeBatch
 } from 'firebase/firestore';
 
+/** Firestore rejects `undefined` anywhere in document data — strip recursively before writes. */
+function omitUndefinedDeep<T>(value: T): T {
+  if (value === undefined) {
+    return value;
+  }
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => omitUndefinedDeep(item)) as T;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v !== undefined) {
+      result[k] = omitUndefinedDeep(v);
+    }
+  }
+  return result as T;
+}
+
 // Collection names
 const COLLECTIONS = {
   SUBSCRIBERS: 'subscribers',
@@ -377,7 +397,7 @@ export const savePosts = async (posts: BlogPost[]): Promise<void> => {
     for (const post of posts) {
       const postRef = doc(db, COLLECTIONS.POSTS, post.id);
       await setDoc(postRef, {
-        ...post,
+        ...omitUndefinedDeep(post),
         updatedAt: serverTimestamp()
       });
     }
@@ -420,13 +440,24 @@ export const getPosts = async (): Promise<BlogPost[] | null> => {
   }
 };
 
+/**
+ * Persists post content. Uses merge so we do not wipe the document, and omits
+ * server-managed counters (`views`, `likesCount`) so `incrementViews` / like
+ * updates are not overwritten by stale client state on the next save.
+ */
 export const savePost = async (post: BlogPost): Promise<void> => {
   try {
     const postRef = doc(db, COLLECTIONS.POSTS, post.id);
-    await setDoc(postRef, {
-      ...post,
-      updatedAt: serverTimestamp()
-    });
+    const cleaned = omitUndefinedDeep(post) as BlogPost;
+    const { views: _views, likesCount: _likes, ...rest } = cleaned;
+    await setDoc(
+      postRef,
+      {
+        ...rest,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
   } catch (error) {
     console.error('Error saving post:', error);
     throw error;
