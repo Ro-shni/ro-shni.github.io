@@ -6,7 +6,7 @@ import { BlockEditor } from './components/BlockEditor';
 import { generateBlogContent, suggestTitle } from './services/geminiService';
 import * as db from './services/mockFirebase';
 import { auth } from './services/firebase';
-import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import { GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from 'firebase/auth';
 import { send } from '@emailjs/browser';
 
 // --- Constants ---
@@ -351,9 +351,27 @@ const LoginView = ({ onLogin }: { onLogin: (u: User) => void }) => {
             // is always populated in Firestore Security Rules, avoiding the client-ID
             // mismatch that occurred when bridging a GIS token via signInWithCredential.
             const provider = new GoogleAuthProvider();
-            const result = await signInWithPopup(auth, provider);
-            const firebaseUser = result.user;
 
+            // Try popup first (better UX), fall back to redirect for environments
+            // where popups are blocked (e.g. GitHub Pages COOP headers).
+            let result;
+            try {
+                result = await signInWithPopup(auth, provider);
+            } catch (popupErr: unknown) {
+                const code = (popupErr as any)?.code;
+                if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+                    setSigningIn(false);
+                    return;
+                }
+                if (code === 'auth/popup-blocked' || code === 'auth/unauthorized-domain') {
+                    // Redirect as fallback — onAuthStateChanged will pick up the user on return
+                    await signInWithRedirect(auth, provider);
+                    return;
+                }
+                throw popupErr;
+            }
+
+            const firebaseUser = result.user;
             const userEmail = firebaseUser.email || '';
             const userName = firebaseUser.displayName || userEmail.split('@')[0];
             const userPicture = firebaseUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(userName)}&background=random`;
@@ -370,11 +388,6 @@ const LoginView = ({ onLogin }: { onLogin: (u: User) => void }) => {
             onLogin(user);
         } catch (e: unknown) {
             console.error('Google Sign-In error:', e);
-            // Don't show error for user-closed popups
-            if (e instanceof Error && (e as any).code === 'auth/popup-closed-by-user') {
-                setSigningIn(false);
-                return;
-            }
             setError('Sign-in failed. Please try again.');
         } finally {
             setSigningIn(false);
@@ -1736,11 +1749,16 @@ const App: React.FC = () => {
       }
   }, []);
 
-  // Sync Firebase Auth state — ensures users appear in Firebase Console Authentication tab
+  // Sync Firebase Auth state — handles:
+  //  1. Session persistence (Firebase Auth restores its own session on reload)
+  //  2. Redirect return (signInWithRedirect completes after page reload)
+  //  3. Popup sign-in already sets user via onLogin callback, so we skip if user exists
   useEffect(() => {
+      // Check for redirect result first (user returning from signInWithRedirect)
+      getRedirectResult(auth).catch(() => {});
+
       const unsubscribe = onAuthStateChanged(auth, (firebaseUser: any) => {
           if (firebaseUser) {
-              // Firebase Auth session is active — record/update the user in Firestore
               const email = firebaseUser.email || '';
               const syncedUser: User = {
                   id: 'google-' + firebaseUser.uid,
@@ -1749,6 +1767,18 @@ const App: React.FC = () => {
                   avatar: firebaseUser.photoURL || '',
                   isAdmin: email === ADMIN_EMAIL
               };
+
+              // If the app has no user yet (e.g. redirect return, or session restore
+              // without localStorage), adopt the Firebase Auth user.
+              setUser(prev => {
+                  if (!prev) {
+                      const { isAdmin: _stripped, ...safeUser } = syncedUser;
+                      localStorage.setItem('roshines_user', JSON.stringify(safeUser));
+                      return syncedUser;
+                  }
+                  return prev;
+              });
+
               db.recordUserLogin(syncedUser).catch(err =>
                   console.error('Failed to sync Firebase Auth user to Firestore:', err)
               );
