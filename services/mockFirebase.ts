@@ -1,22 +1,35 @@
 // Firebase Firestore Service - Real database for persistent data
 import { User, Comment, BlogPost } from '../types';
-import { db } from './firebase';
-import { 
-  collection, 
-  doc, 
-  getDocs, 
+import { db, auth } from './firebase';
+import {
+  collection,
+  doc,
+  getDocs,
   getDoc,
-  addDoc, 
+  addDoc,
   setDoc,
   deleteDoc,
   updateDoc,
   increment,
-  query, 
-  where, 
+  query,
+  where,
   serverTimestamp,
   Timestamp,
   writeBatch
 } from 'firebase/firestore';
+
+/**
+ * Asserts that Firebase Auth has a current user before attempting a Firestore
+ * write that is gated by security rules (`request.auth != null`).  Throws a
+ * user-friendly error when the session is missing so callers can surface it.
+ */
+function requireAuth(): void {
+  if (!auth.currentUser) {
+    throw new Error(
+      'NOT_AUTHENTICATED: Your session has expired or Firebase authentication was not established. Please sign out and sign in again.'
+    );
+  }
+}
 
 /** Firestore rejects `undefined` anywhere in document data — strip recursively before writes. */
 function omitUndefinedDeep<T>(value: T): T {
@@ -446,6 +459,7 @@ export const getPosts = async (): Promise<BlogPost[] | null> => {
  * updates are not overwritten by stale client state on the next save.
  */
 export const savePost = async (post: BlogPost): Promise<void> => {
+  requireAuth();
   try {
     const postRef = doc(db, COLLECTIONS.POSTS, post.id);
     const cleaned = omitUndefinedDeep(post) as BlogPost;
@@ -465,6 +479,7 @@ export const savePost = async (post: BlogPost): Promise<void> => {
 };
 
 export const deletePost = async (postId: string): Promise<void> => {
+  requireAuth();
   try {
     const batch = writeBatch(db);
 

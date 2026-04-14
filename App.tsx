@@ -6,7 +6,7 @@ import { BlockEditor } from './components/BlockEditor';
 import { generateBlogContent, suggestTitle } from './services/geminiService';
 import * as db from './services/mockFirebase';
 import { auth } from './services/firebase';
-import { GoogleAuthProvider, signInWithCredential, onAuthStateChanged } from 'firebase/auth';
+import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 import { send } from '@emailjs/browser';
 
 // --- Constants ---
@@ -338,141 +338,48 @@ const NewsletterModal = ({ isOpen, onClose, onSubscribe, currentUser }: { isOpen
 // Admin email constant — sourced from env var so it is not a hardcoded literal in the bundle
 const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL || 'roshni.nekkanti@gmail.com';
 
-// Helper function to decode JWT token from Google
-const decodeJwtPayload = (token: string): any => {
-    try {
-        const base64Url = token.split('.')[1];
-        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-        const jsonPayload = decodeURIComponent(
-            atob(base64)
-                .split('')
-                .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-                .join('')
-        );
-        return JSON.parse(jsonPayload);
-    } catch (e) {
-        console.error('Failed to decode JWT:', e);
-        return null;
-    }
-};
 
 const LoginView = ({ onLogin }: { onLogin: (u: User) => void }) => {
     const [error, setError] = useState<string | null>(null);
-    const googleButtonRef = useRef<HTMLDivElement>(null);
-    
-    // Store onLogin in a ref to avoid stale closure issues
-    const onLoginRef = useRef(onLogin);
-    useEffect(() => {
-        onLoginRef.current = onLogin;
-    }, [onLogin]);
+    const [signingIn, setSigningIn] = useState(false);
 
-    // Initialize Google Sign-In when component mounts
-    useEffect(() => {
-        let checkGoogleInterval: ReturnType<typeof setInterval> | null = null;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        let isMounted = true;
-        
-        // Handle the Google Sign-In credential response
-        const handleCredentialResponse = async (response: any) => {
-            if (!isMounted) return;
-            
-            try {
-                const payload = decodeJwtPayload(response.credential);
-                
-                if (!payload || !payload.email) {
-                    if (isMounted) setError('Could not read account information. Please try again.');
-                    return;
-                }
-                
-                const userEmail = payload.email;
-                const userName = payload.name || payload.email.split('@')[0];
-                const userPicture = payload.picture || `https://ui-avatars.com/api/?name=${encodeURIComponent(userName)}&background=random`;
-                
-                // Sign in with Firebase Auth so request.auth is populated in Firestore Security Rules.
-                // This is best-effort — if Firebase Auth provider is not yet enabled in the console,
-                // we log the error but still allow the user to proceed with the app.
-                try {
-                    const googleCredential = GoogleAuthProvider.credential(response.credential);
-                    await signInWithCredential(auth, googleCredential);
-                } catch (firebaseAuthError) {
-                    console.warn('Firebase Auth sign-in failed (check Google provider is enabled in Firebase Console):', firebaseAuthError);
-                }
-                
-                // Determine if user is admin based on email — computed fresh every login, never from storage
-                const isAdmin = userEmail === ADMIN_EMAIL;
-                
-                const user: User = {
-                    id: 'google-' + payload.sub,
-                    name: userName,
-                    email: userEmail,
-                    avatar: userPicture,
-                    isAdmin: isAdmin
-                };
-                
-                // Use ref to always get the latest onLogin function
-                onLoginRef.current(user);
-            } catch (e) {
-                console.error('Google Sign-In error:', e);
-                if (isMounted) setError('Sign-in failed. Please try again.');
-            }
-        };
-        
-        // Check if google is available
-        const initializeGoogleSignIn = () => {
-            if (!isMounted) return;
-            
-            if (typeof window !== 'undefined' && (window as any).google) {
-                (window as any).google.accounts.id.initialize({
-                    client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || '',
-                    callback: handleCredentialResponse,
-                    auto_select: false,
-                    cancel_on_tap_outside: true,
-                });
-                
-                if (googleButtonRef.current) {
-                    (window as any).google.accounts.id.renderButton(
-                        googleButtonRef.current,
-                        { 
-                            type: 'standard',
-                            theme: 'filled_black',
-                            size: 'large',
-                            text: 'signin_with',
-                            shape: 'pill',
-                            width: 300
-                        }
-                    );
-                }
-            }
-        };
+    const handleGoogleSignIn = async () => {
+        setError(null);
+        setSigningIn(true);
+        try {
+            // Use Firebase Auth's native Google sign-in — this ensures request.auth
+            // is always populated in Firestore Security Rules, avoiding the client-ID
+            // mismatch that occurred when bridging a GIS token via signInWithCredential.
+            const provider = new GoogleAuthProvider();
+            const result = await signInWithPopup(auth, provider);
+            const firebaseUser = result.user;
 
-        // Wait for google script to load
-        if ((window as any).google) {
-            initializeGoogleSignIn();
-        } else {
-            checkGoogleInterval = setInterval(() => {
-                if ((window as any).google) {
-                    if (checkGoogleInterval) clearInterval(checkGoogleInterval);
-                    checkGoogleInterval = null;
-                    initializeGoogleSignIn();
-                }
-            }, 100);
-            
-            // Cleanup interval after 10 seconds if Google still hasn't loaded
-            timeoutId = setTimeout(() => {
-                if (checkGoogleInterval) {
-                    clearInterval(checkGoogleInterval);
-                    checkGoogleInterval = null;
-                }
-            }, 10000);
+            const userEmail = firebaseUser.email || '';
+            const userName = firebaseUser.displayName || userEmail.split('@')[0];
+            const userPicture = firebaseUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(userName)}&background=random`;
+            const isAdmin = userEmail === ADMIN_EMAIL;
+
+            const user: User = {
+                id: 'google-' + firebaseUser.uid,
+                name: userName,
+                email: userEmail,
+                avatar: userPicture,
+                isAdmin,
+            };
+
+            onLogin(user);
+        } catch (e: unknown) {
+            console.error('Google Sign-In error:', e);
+            // Don't show error for user-closed popups
+            if (e instanceof Error && (e as any).code === 'auth/popup-closed-by-user') {
+                setSigningIn(false);
+                return;
+            }
+            setError('Sign-in failed. Please try again.');
+        } finally {
+            setSigningIn(false);
         }
-        
-        // Cleanup function to prevent memory leaks
-        return () => {
-            isMounted = false;
-            if (checkGoogleInterval) clearInterval(checkGoogleInterval);
-            if (timeoutId) clearTimeout(timeoutId);
-        };
-    }, []);
+    };
 
     return (
         <div className="min-h-[80vh] flex items-center justify-center p-4 relative overflow-hidden">
@@ -480,7 +387,7 @@ const LoginView = ({ onLogin }: { onLogin: (u: User) => void }) => {
             <div className="absolute inset-0 z-0">
                 <img src={DEFAULT_HERO_IMAGE} className="w-full h-full object-cover opacity-10 blur-sm" alt="" />
             </div>
-            
+
             <div className="relative z-10 max-w-sm w-full bg-white/90 backdrop-blur p-8 rounded-3xl shadow-2xl border border-white/50 text-center">
                 <div className="mb-8">
                     <h2 className="text-3xl font-serif font-bold text-stone-900 mb-2">Welcome</h2>
@@ -494,10 +401,21 @@ const LoginView = ({ onLogin }: { onLogin: (u: User) => void }) => {
                 )}
 
                 <div className="flex justify-center">
-                    {/* Google Sign-In Button rendered here */}
-                    <div ref={googleButtonRef}></div>
+                    <button
+                        onClick={handleGoogleSignIn}
+                        disabled={signingIn}
+                        className="flex items-center gap-3 px-6 py-3 bg-stone-900 text-white rounded-full hover:bg-stone-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <svg className="w-5 h-5" viewBox="0 0 24 24">
+                            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/>
+                            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                        </svg>
+                        {signingIn ? 'Signing in...' : 'Sign in with Google'}
+                    </button>
                 </div>
-                
+
                 <p className="mt-8 text-xs text-stone-400">
                     By continuing, you agree to our Terms of Service and Privacy Policy.
                 </p>
@@ -1887,6 +1805,7 @@ const App: React.FC = () => {
   const handleLogout = () => {
       setUser(null);
       localStorage.removeItem('roshines_user');
+      signOut(auth).catch(() => {});
       setView({ type: 'home' });
   };
 
@@ -1919,14 +1838,17 @@ const App: React.FC = () => {
 
     try {
       await db.savePost(postToSave);
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('Error saving post to Firestore:', error);
       if (existing) {
         setPosts(prev => prev.map(p => (p.id === postToSave.id ? existing : p)));
       } else {
         setPosts(prev => prev.filter(p => p.id !== postToSave.id));
       }
-      setNotification('Failed to save post. Please try again.');
+      const msg = error instanceof Error && error.message.startsWith('NOT_AUTHENTICATED')
+        ? 'Session expired — please sign out and sign in again to publish.'
+        : 'Failed to save post. Please try again.';
+      setNotification(msg);
       return;
     } finally {
       postSaveInFlightRef.current = false;
@@ -1954,11 +1876,14 @@ const App: React.FC = () => {
       // Delete from Firestore
       try {
         await db.deletePost(id);
-      } catch (error) {
+      } catch (error: unknown) {
         console.error('Error deleting post from Firestore:', error);
         // Revert optimistic delete on failure
         if (original) setPosts(prev => [original, ...prev]);
-        setNotification('Failed to delete post. Please try again.');
+        const msg = error instanceof Error && error.message.startsWith('NOT_AUTHENTICATED')
+          ? 'Session expired — please sign out and sign in again to delete posts.'
+          : 'Failed to delete post. Please try again.';
+        setNotification(msg);
       }
   };
   
@@ -1973,11 +1898,14 @@ const App: React.FC = () => {
           // Save to Firestore
           try {
             await db.savePost(updated);
-          } catch (error) {
+          } catch (error: unknown) {
             console.error('Error updating post status in Firestore:', error);
             // Revert optimistic status toggle on failure
             setPosts(prev => prev.map(p => p.id === id ? post : p));
-            setNotification('Failed to update post status. Please try again.');
+            const msg = error instanceof Error && error.message.startsWith('NOT_AUTHENTICATED')
+              ? 'Session expired — please sign out and sign in again to publish.'
+              : 'Failed to update post status. Please try again.';
+            setNotification(msg);
             return;
           }
           

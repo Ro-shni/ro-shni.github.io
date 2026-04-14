@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Posts — public read, authenticated users can write
+    match /posts/{postId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Comments — public read, authenticated users can write
+    match /comments/{commentId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Likes — public read, authenticated users can write
+    match /likes/{likeId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Reactions — public read, authenticated users can write
+    match /reactions/{reactionId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Subscribers — public read/write (anyone can subscribe via email)
+    match /subscribers/{subId} {
+      allow read, write: if true;
+    }
+
+    // Meta counters (subscriber count etc.) — public read/write
+    match /meta/{docId} {
+      allow read, write: if true;
+    }
+
+    // Users — public read, authenticated users can write their own profile
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Page views — public read/write (analytics tracking)
+    match /pageViews/{viewId} {
+      allow read, write: if true;
+    }
+  }
+}
