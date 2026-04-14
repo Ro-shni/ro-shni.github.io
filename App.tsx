@@ -1128,11 +1128,6 @@ const HomeView: React.FC<{
                         <span className="inline-block py-1 px-3 rounded-full bg-white/20 backdrop-blur-sm text-stone-900 text-xs font-semibold uppercase tracking-widest mb-4 border border-white/30">Welcome to Ro-shines</span>
                         <h1 className="text-5xl md:text-7xl font-serif font-bold text-stone-900 mb-6 drop-shadow-sm">Stories by Roshni</h1>
                         <p className="text-lg md:text-xl text-stone-700 max-w-2xl mx-auto font-light">Exploring the intersection of design, culture, and conscious living.</p>
-                        <p className="text-xs md:text-sm max-w-xs font-serif italic mt-3 text-rose-500 text-center mx-auto">
-                            <span className="bg-rose-200/60 px-3 py-1 rounded-md leading-relaxed select-none">
-                                roses are red, violets are blue, i patched the garden, no entry for you 🌹<br />the garden is tended, the gate is locked, bloom season is over for uninvited guests 🌸
-                            </span>
-                        </p>
                     </div>
                 </section>
             )}
