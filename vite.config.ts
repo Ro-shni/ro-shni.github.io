@@ -5,8 +5,9 @@ import react from '@vitejs/plugin-react';
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
-      // GitHub Pages needs a repo base path — adjust to your repo name
-      base: '/Roshines/',
+      // User-site repo (ro-shni.github.io) + custom domain blog.roshines.in
+      // both serve from the domain root, so base must be '/'.
+      base: '/',
       server: {
         port: 3000,
         host: 'localhost',
